@@ -1,0 +1,8 @@
+__*
+!*__.py
+
+*.egg-info
+\.venv*
+\.*shinit
+\.clangd
+*.so

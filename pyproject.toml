@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools", "wheel", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastrdp"
+version = "1.0.0"
+description = "A native C++ implementation of the RDP algorithm for Python."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+]
+
+[tool.setuptools]
+ext-modules = [
+  {name="_fastrdp", sources=["_fastrdp.cpp"], extra-compile-args=["-std=c++23"]},
+]
