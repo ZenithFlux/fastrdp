@@ -33,6 +33,9 @@ def rdp(
 ):
     x_f8 = x.astype("f8")
     y = _c.rdp(x_f8, eps, dist_func, algo, return_mask)
+    if return_mask:
+        return y
+
     if np.issubdtype(x.dtype, np.integer):
         y = y.round()
     y = y.astype(x.dtype)

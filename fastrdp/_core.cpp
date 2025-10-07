@@ -18,33 +18,34 @@ using RMatrixXd = E::Matrix<double, E::Dynamic, E::Dynamic, E::RowMajor>;
 using MapMatrix = E::Map<RMatrixXd, 0, DStride>;
 
 
-void destruct_capsule(PyObject* cap) {
+static void destruct_capsule(PyObject* cap) {
     void *ptr = PyCapsule_GetPointer(cap, NULL);
     delete[] static_cast<double*>(ptr);
 }
 
 
-struct MatOrStr {
-    std::variant<MapMatrix, string> data;
-    bool is_mat() {
-        return data.index() == 0;
-    }
+struct MatMaskErr {
+    std::variant<MapMatrix, vector<bool>, string> data;
+
+    bool is_mat() { return data.index() == 0; }
+    bool is_mask() { return data.index() == 1; }
+    bool is_err() { return data.index() == 2; }
 };
 
 
-MapMatrix new_mat(E::Index rows, E::Index cols) {
+static MapMatrix new_mat(E::Index rows, E::Index cols) {
     double *data = new double[rows * cols];
     MapMatrix mat(data, rows, cols, DStride(cols, 1));
     return mat;
 }
 
 
-void del_mat(MapMatrix& m) {
+static void del_mat(MapMatrix& m) {
     delete[] m.data();
 }
 
 
-MatOrStr to_matrix(PyArrayObject* x) {
+static MatMaskErr to_matrix(PyArrayObject* x) {
     int x_ndim = PyArray_NDIM(x);
     if (x_ndim != 2) {
         const string err = std::format("The array should have 2 dims, but has {} dims.", x_ndim);
@@ -65,10 +66,10 @@ MatOrStr to_matrix(PyArrayObject* x) {
 }
 
 
-PyArrayObject* to_ndarray(MapMatrix& m) {
+static PyArrayObject* to_ndarray(MapMatrix& m) {
+    int ndim = 2;
     npy_intp const dims[] = {m.rows(), m.cols()};
     npy_intp const stride[] = {m.rowStride() * 8, m.colStride() * 8};
-    int ndim = 2;
     auto *m_npy = (PyArrayObject*) PyArray_New(&PyArray_Type, ndim, dims, NPY_FLOAT64,
                                                stride, m.data(), -1, 0, NULL);
     PyObject *m_npy_base = PyCapsule_New(m.data(), NULL, destruct_capsule);
@@ -77,7 +78,23 @@ PyArrayObject* to_ndarray(MapMatrix& m) {
 }
 
 
-double pl_dist(vector<double> point, vector<double> start, vector<double> end) {
+static PyArrayObject* to_ndarray(const vector<bool>& x) {
+    bool *data = new bool[x.size()];
+    for (size_t i=0; i < x.size(); ++i) {
+        data[i] = x[i];
+    }
+    int ndim = 1;
+    npy_intp const dims[] = {static_cast<npy_intp>(x.size())};
+    npy_intp const stride[] = {sizeof(bool)};
+    auto *x_npy = (PyArrayObject*) PyArray_New(&PyArray_Type, ndim, dims, NPY_BOOL,
+                                               stride, data, -1, 0, NULL);
+    PyObject *x_npy_base = PyCapsule_New(data, NULL, destruct_capsule);
+    PyArray_SetBaseObject(x_npy, x_npy_base);
+    return x_npy;
+}
+
+
+static double pl_dist(vector<double> point, vector<double> start, vector<double> end) {
     bool equal = true;
     for (size_t i = 0; i < start.size(); i++) {
         if (start[i] != end[i]) {
@@ -118,12 +135,13 @@ double pl_dist(vector<double> point, vector<double> start, vector<double> end) {
     }
     line_norm = sqrt(line_norm);
 
-    return abs(cross_norm) / line_norm;
+    double dist = abs(cross_norm) / line_norm;
+    return dist;
 }
 
 
 // Helper function to convert MapMatrix row to vector<double>
-vector<double> get_row(const MapMatrix& M, E::Index idx) {
+static vector<double> get_row(const MapMatrix& M, E::Index idx) {
     vector<double> row(M.cols());
     for (E::Index i = 0; i < M.cols(); i++) {
         row[i] = M(idx, i);
@@ -133,7 +151,7 @@ vector<double> get_row(const MapMatrix& M, E::Index idx) {
 
 
 // Recursive RDP implementation
-MapMatrix rdp_rec(const MapMatrix& M, double epsilon) {
+static MapMatrix rdp_rec(const MapMatrix& M, double epsilon) {
     if (M.rows() <= 2) {
         MapMatrix result = new_mat(M.rows(), M.cols());
         result = M;
@@ -143,18 +161,11 @@ MapMatrix rdp_rec(const MapMatrix& M, double epsilon) {
     double dmax = 0.0;
     E::Index index = -1;
 
-    vector<double> start(M.cols());
-    vector<double> end(M.cols());
-    for (E::Index i = 0; i < M.cols(); i++) {
-        start[i] = M(0, i);
-        end[i] = M(M.rows() - 1, i);
-    }
+    vector<double> start = get_row(M, 0);
+    vector<double> end = get_row(M, M.rows()-1);
 
     for (E::Index i = 1; i < M.rows(); i++) {
-        vector<double> point(M.cols());
-        for (E::Index j = 0; j < M.cols(); j++) {
-            point[j] = M(i, j);
-        }
+        vector<double> point = get_row(M, i);
         double d = pl_dist(point, start, end);
         if (d > dmax) {
             index = i;
@@ -194,13 +205,14 @@ MapMatrix rdp_rec(const MapMatrix& M, double epsilon) {
 }
 
 
-// Helper for iterative RDP
-vector<bool> _rdp_iter(const MapMatrix& M, E::Index start_index, E::Index last_index, double epsilon) {
+// Iterative RDP (returns mask)
+static vector<bool> rdp_iter_mask(const MapMatrix& M, E::Index start_i, E::Index last_i, double eps) {
     vector<std::pair<E::Index, E::Index>> stk;
-    stk.push_back({start_index, last_index});
-
-    E::Index global_start_index = start_index;
-    vector<bool> indices(last_index - start_index + 1, true);
+    stk.push_back({start_i, last_i});
+    vector<bool> mask(M.rows(), true);
+    for (E::Index i = start_i+1; i < last_i; ++i) {
+        mask[i] = false;
+    }
 
     while (!stk.empty()) {
         auto [si, li] = stk.back();
@@ -213,35 +225,29 @@ vector<bool> _rdp_iter(const MapMatrix& M, E::Index start_index, E::Index last_i
         vector<double> end = get_row(M, li);
 
         for (E::Index i = si + 1; i < li; i++) {
-            if (indices[i - global_start_index]) {
-                vector<double> point = get_row(M, i);
-                double d = pl_dist(point, start, end);
-                if (d > dmax) {
-                    index = i;
-                    dmax = d;
-                }
+            vector<double> point = get_row(M, i);
+            double d = pl_dist(point, start, end);
+            if (d > dmax) {
+                index = i;
+                dmax = d;
             }
         }
 
-        if (dmax > epsilon) {
+        if (dmax > eps) {
+            mask[index] = true;
             stk.push_back({si, index});
             stk.push_back({index, li});
-        } else {
-            for (E::Index i = si + 1; i < li; i++) {
-                indices[i - global_start_index] = false;
-            }
         }
     }
 
-    return indices;
+    return mask;
 }
 
 
-// Iterative RDP that returns mask
-MapMatrix rdp_iter_mask(const MapMatrix& M, double epsilon) {
-    vector<bool> mask = _rdp_iter(M, 0, M.rows() - 1, epsilon);
+// Iterative RDP
+static MapMatrix rdp_iter(const MapMatrix& M, double eps) {
+    vector<bool> mask = rdp_iter_mask(M, 0, M.rows() - 1, eps);
 
-    // Count true values
     E::Index count = 0;
     for (bool b : mask) {
         if (b) count++;
@@ -250,41 +256,27 @@ MapMatrix rdp_iter_mask(const MapMatrix& M, double epsilon) {
     MapMatrix result = new_mat(count, M.cols());
     E::Index idx = 0;
     for (size_t i = 0; i < mask.size(); i++) {
-        if (mask[i]) {
-            result.row(idx++) = M.row(i);
-        }
+        if (!mask[i]) continue;
+        result.row(idx++) = M.row(i);
     }
 
     return result;
 }
 
 
-// Iterative RDP that returns boolean mask as matrix
-MapMatrix rdp_iter_return_mask(const MapMatrix& M, double epsilon) {
-    vector<bool> mask = _rdp_iter(M, 0, M.rows() - 1, epsilon);
-
-    MapMatrix result = new_mat(mask.size(), 1);
-    for (size_t i = 0; i < mask.size(); i++) {
-        result(i, 0) = mask[i] ? 1.0 : 0.0;
-    }
-
-    return result;
-}
-
-
-MatOrStr rdp(const MapMatrix& x, double eps, const string& algo, bool return_mask) {
+static MatMaskErr rdp(const MapMatrix& M, double eps, const string& algo, bool return_mask) {
     if (algo == "iter") {
         if (return_mask) {
-            return {rdp_iter_return_mask(x, eps)};
+            return {rdp_iter_mask(M, 0, M.rows() - 1, eps)};
         } else {
-            return {rdp_iter_mask(x, eps)};
+            return {rdp_iter(M, eps)};
         }
     } else if (algo == "rec") {
         if (return_mask) {
             const string err = "return_mask=True not supported with algo=\"rec\"";
             return {err};
         }
-        return {rdp_rec(x, eps)};
+        return {rdp_rec(M, eps)};
     } else {
         const string err = std::format("Invalid algorithm '{}'. Must be either 'iter' or 'rec'.", algo);
         return {err};
@@ -304,8 +296,8 @@ static PyObject *py_rdp(PyObject *self, PyObject *args) {
         PyErr_SetString(PyExc_Exception, "Bad Arguments!!");
         return NULL;
     }
-    MatOrStr _x_mat = to_matrix(x);
-    if (!_x_mat.is_mat()) {
+    MatMaskErr _x_mat = to_matrix(x);
+    if (_x_mat.is_err()) {
         string& err = std::get<string>(_x_mat.data);
         PyErr_SetString(PyExc_Exception, err.c_str());
         return NULL;
@@ -314,11 +306,17 @@ static PyObject *py_rdp(PyObject *self, PyObject *args) {
     const string algo(_algo);
     bool return_mask = _return_mask;
 
-    MatOrStr _res = rdp(x_mat, eps, algo, return_mask);
-    if (!_res.is_mat()) {
+    MatMaskErr _res = rdp(x_mat, eps, algo, return_mask);
+
+    if (_res.is_err()) {
         string& err = std::get<string>(_res.data);
         PyErr_SetString(PyExc_Exception, err.c_str());
         return NULL;
+    }
+    else if (_res.is_mask()) {
+        auto& res = std::get<vector<bool>>(_res.data);
+        PyArrayObject *res_npy = to_ndarray(res);
+        return (PyObject*) res_npy;
     }
     auto res = std::move(std::get<MapMatrix>(_res.data));
     PyArrayObject *res_npy = to_ndarray(res);
