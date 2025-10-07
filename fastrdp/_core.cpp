@@ -334,13 +334,13 @@ static PyMethodDef methods[] = {
 
 static struct PyModuleDef module = {
     .m_base = PyModuleDef_HEAD_INIT,
-    .m_name = "_fastrdp",
+    .m_name = "fastrdp._core",
     .m_doc = PyDoc_STR("C++ implementation of RDP algorithm."),
     .m_methods = methods,
 };
 
 
-PyMODINIT_FUNC PyInit__fastrdp(void) {
+PyMODINIT_FUNC PyInit__core(void) {
     import_array();
     return PyModuleDef_Init(&module);
 }

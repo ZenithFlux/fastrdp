@@ -1,6 +1,6 @@
 import numpy as np
 
-import _fastrdp as _c
+from . import _core as _c
 
 
 def pldist(point, start, end):
