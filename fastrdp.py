@@ -27,7 +27,7 @@ def pldist(point, start, end):
 def rdp(
     x: np.ndarray,
     eps: float = 0.0,
-    dist_func=pldist,
+    dist_func=None,
     algo: str = "iter",
     return_mask: bool = False,
 ):
