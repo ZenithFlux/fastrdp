@@ -102,7 +102,7 @@ static double p_norm(const vector<T>& x, int p=2) {
     for (const auto& a : x) {
         res += pow(a, p);
     }
-    res = pow(res, 1/p);
+    res = pow(res, 1./p);
     return res;
 }
 
