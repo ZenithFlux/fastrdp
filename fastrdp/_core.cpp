@@ -1,5 +1,6 @@
 #include "Eigen/Dense"
 #include <format>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <variant>
@@ -60,13 +61,14 @@ static MatMaskErr to_matrix(PyArrayObject* x) {
     npy_intp r = PyArray_DIM(x, 0), c = PyArray_DIM(x, 1);
     npy_intp sr = PyArray_STRIDE(x, 0), sc = PyArray_STRIDE(x, 1);
     double *x_data = static_cast<double *>(PyArray_DATA(x));
-    const DStride x_mat_s(sr / 8, sc / 8);
+    size_t el_size = sizeof(double);
+    const DStride x_mat_s(sr / el_size, sc / el_size);
     MapMatrix x_mat(x_data, r, c, x_mat_s);
     return {x_mat};
 }
 
 
-static PyArrayObject* to_ndarray(MapMatrix& m) {
+static PyArrayObject* to_numpy(MapMatrix& m) {
     int ndim = 2;
     npy_intp const dims[] = {m.rows(), m.cols()};
     npy_intp const stride[] = {m.rowStride() * 8, m.colStride() * 8};
@@ -78,7 +80,7 @@ static PyArrayObject* to_ndarray(MapMatrix& m) {
 }
 
 
-static PyArrayObject* to_ndarray(const vector<bool>& x) {
+static PyArrayObject* to_numpy(const vector<bool>& x) {
     bool *data = new bool[x.size()];
     for (size_t i=0; i < x.size(); ++i) {
         data[i] = x[i];
@@ -94,49 +96,69 @@ static PyArrayObject* to_ndarray(const vector<bool>& x) {
 }
 
 
-static double pl_dist(vector<double> point, vector<double> start, vector<double> end) {
+template <typename T>
+static double p_norm(const vector<T>& x, int p=2) {
+    double res = 0;
+    for (const auto& a : x) {
+        res += pow(a, p);
+    }
+    res = pow(res, 1/p);
+    return res;
+}
+
+
+template <typename T>
+static double euclidean(vector<T> x, const vector<T>& y) {
+    if (x.size() != y.size()) {
+        throw std::runtime_error("(euclidean) x and y must have same size.");
+    }
+    for (size_t i=0; i < x.size(); ++i) {
+        x[i] -= y[i];
+    }
+    return p_norm(x);
+}
+
+
+static double pl_dist(const vector<double>& point, const vector<double>& start, const vector<double>& end) {
+    const size_t dim = point.size();
+
     bool equal = true;
-    for (size_t i = 0; i < start.size(); i++) {
-        if (start[i] != end[i]) {
-            equal = false;
-            break;
-        }
+    if (start.size() != end.size() || point.size() != start.size()) {
+        throw std::runtime_error("(pl dist) All vectors must be of equal size.");
+    }
+    if (start.size() < 2 || start.size() > 3) {
+        throw std::runtime_error("(pl_dist) Inputs must be of size 2 or 3 only.");
     }
 
-    if (equal) {
-        double sum = 0.0;
-        for (size_t i = 0; i < point.size(); i++) {
-            double diff = point[i] - start[i];
-            sum += diff * diff;
-        }
-        return sqrt(sum);
+    if (start == end) {
+        return euclidean(point, start);
     }
 
-    vector<double> v1(3), v2(3);
-    for (size_t i = 0; i < 3; i++) {
+    vector<double> v1(dim);
+    vector<double> v2(dim);
+
+    for (size_t i = 0; i < dim; i++) {
         v1[i] = end[i] - start[i];
         v2[i] = start[i] - point[i];
     }
 
-    vector<double> cross(3);
-    cross[0] = v1[1] * v2[2] - v1[2] * v2[1];
-    cross[1] = v1[2] * v2[0] - v1[0] * v2[2];
-    cross[2] = v1[0] * v2[1] - v1[1] * v2[0];
-
     double cross_norm = 0.0;
-    for (size_t i = 0; i < 3; i++) {
-        cross_norm += cross[i] * cross[i];
+    if (dim == 2) {
+        double Pz = v1[0] * v2[1] - v1[1] * v2[0];
+        cross_norm = abs(Pz);
     }
-    cross_norm = sqrt(cross_norm);
+    else {
+        vector<double> cross(3);
 
-    double line_norm = 0.0;
-    for (size_t i = 0; i < v1.size(); i++) {
-        line_norm += v1[i] * v1[i];
+        cross[0] = v1[1] * v2[2] - v1[2] * v2[1];
+        cross[1] = v1[2] * v2[0] - v1[0] * v2[2];
+        cross[2] = v1[0] * v2[1] - v1[1] * v2[0];
+
+        cross_norm = p_norm(cross);
     }
-    line_norm = sqrt(line_norm);
 
-    double dist = abs(cross_norm) / line_norm;
-    return dist;
+    double line_norm = p_norm(v1);
+    return cross_norm / line_norm;
 }
 
 
@@ -284,7 +306,7 @@ static MatMaskErr rdp(const MapMatrix& M, double eps, const string& algo, bool r
 }
 
 
-static PyObject *py_rdp(PyObject *self, PyObject *args) {
+static PyObject* py_rdp(PyObject *self, PyObject *args) {
     PyArrayObject *x;
     double eps;
     PyObject *dist_func; // Currently unused
@@ -315,11 +337,11 @@ static PyObject *py_rdp(PyObject *self, PyObject *args) {
     }
     else if (_res.is_mask()) {
         auto& res = std::get<vector<bool>>(_res.data);
-        PyArrayObject *res_npy = to_ndarray(res);
+        PyArrayObject *res_npy = to_numpy(res);
         return (PyObject*) res_npy;
     }
     auto res = std::move(std::get<MapMatrix>(_res.data));
-    PyArrayObject *res_npy = to_ndarray(res);
+    PyArrayObject *res_npy = to_numpy(res);
     return (PyObject*) res_npy;
 }
 
